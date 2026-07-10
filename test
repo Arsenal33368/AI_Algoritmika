@@ -1,0 +1,28 @@
+import random
+
+
+random_number = random.randint(1, 20)
+random_number2 = random.randint(-5, 5)
+
+a = 0
+
+while a < 5:
+    guess = int(input("Угадай число от 1 до 30: "))
+    if guess == random_number:
+        print("Вы угадали число за", a + 1, "попытки")
+        break
+    elif guess < random_number:
+        print("Число больше")
+        a += 1
+        print("Попыток осталось:", 5 - a)
+        
+  
+    
+    else:
+        print("Число меньше")
+        a += 1
+        print("Попыток осталось:", 5 - a)
+
+if a == 53:
+    print("Вы проиграли! Реальное число было:", random_number)
+
