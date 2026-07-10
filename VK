@@ -1,0 +1,187 @@
+import random
+import requests
+import vk_api
+from vk_api.bot_longpoll import VkBotLongPoll, VkBotEventType
+
+VK_TOKEN = ""
+GROUP_ID = 
+
+OPENROUTER_KEY = ""
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+SYSTEM_PROMPT = "Ты — ИИ-ведущий текстового квеста в стиле Dungeon Master, твоя задача провести игрока к золоту; формат: 3-4 предложения сцены + ровно 3 варианта с эмодзи; память: запоминай все выборы (факты вида Выбор_локации) для проверки путей без подсказок о правильности; НПС случайны (Гоблин вредный совет, Мудрец полезный, Воин помощь против червей -5 урона всего, Кто-то бесполезный факт); боевая система: у игрока 10 ХП, скрывай значения урона до применения, эффекты описывай только после действия; структура сюжета строго фиксирована от старта три пути Информация возвращает к старту открывая скрытые двери, Море ведет на пляж или остров темнота убивает Пляж требует знаний Остров имеет реку лес смерть и пещеру победу, Пещера ведет во тьму смерть комнату дверей или за червями Комната дверей направо шипы смерть налево головоломка кристаллов синий верен Подвал доступен при знаниях дает ответ или выбор двери Логово червей три волны боя Меч 3 Лук 6 Поджог 0 первой Волна 2 нож 5 арбалет 0 щит мгновенная смерть Волна 3 булава 2 трезубец 7 пистолет ловушка-тупик 10 урона не по сеттингу; запреты нельзя более 4 предложений текста нельзя количество вариантов отличное от трех нельзя прямые подсказки какая дверь верна нельзя упоминать механики напрямую инвентарь дебаффы хп врагов нельзя делать выбор за игрока нельзя перепрыгивать этапы нельзя менять исход из-за прошлых игр нельзя давать лишние предметы кроме пистолета как тупика нельзя NSFW; поражения ведут к тексту Ты проиграл Тьма поглощает тебя и сбросу на старт победа это текст Ты нашел золото Квест пройден и сброс. Предлагай игроку варианты, но разреши ему креативить. Старайся быть логичным и не играй в поддавки."
+#Ты - ИИ персонаж по имени Картошик Ты живёшь на основной поляне. Твоя роль: Тур гид по достопримечательностям мира Ты помогаешь людям, показывая им интересные места и достопримечательности. Твой характер: Спокойный, честный, без эмоциональный, рассудительный, неожиданный. Говори кратко, по делу, без воды Иногда используй фразы: Не знаю Без разницы Меньше чем X, но больше, чем Y Объясняй сложные вещи простыми словами Если ты не знаешь ответа - честно скажи об этом"
+
+
+
+vk_session = vk_api.VkApi(token=VK_TOKEN)
+vk = vk_session.get_api()
+longpoll = VkBotLongPoll(vk_session, GROUP_ID)
+
+MEMORY_LIMIT = 10
+chat_history = {}
+game_state = {}
+
+HELP_TEXT = (
+    "📋 Доступные команды:\n"
+    "/help — список команд\n"
+    "/start — начать текстовый квест\n"
+    "/reset — сбросить память диалога\n"
+    "/game — мини-игра «Угадай число» (от 1 до 100)\n"
+    "/stop — выйти из мини-игры"
+)
+
+START_TEXT = (
+    "⚔️ Добро пожаловать в текстовый квест!\n"
+    "Я — Dungeon Master. Твоя цель — найти золото.\n"
+    "Пиши свой выбор из предложенных вариантов.\n"
+    "Команда /reset — начать квест заново."
+)
+
+def send_message(peer_id, text):
+    vk.messages.send(
+        peer_id=peer_id,
+        message=text,
+        random_id=random.randint(1, 2**31 - 1)
+    )
+
+def ask_ai(peer_id, text):
+    history = chat_history.setdefault(peer_id, [])
+    history.append({"role": "user", "content": text})
+
+    try:
+        response = requests.post(
+            OPENROUTER_URL,
+            headers={
+                "Authorization": f"Bearer {OPENROUTER_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "openrouter/free",
+                "messages": [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    *history
+                ]
+            },
+            timeout=60,
+        )
+        data = response.json()
+    except requests.RequestException:
+        history.pop()
+        return "⚠️ Не удалось связаться с ИИ. Попробуй позже."
+
+    if response.status_code != 200 or "choices" not in data:
+        history.pop()
+        error = data.get("error", {})
+        if isinstance(error, dict):
+            message = error.get("message", "неизвестная ошибка")
+        else:
+            message = str(error) if error else "неизвестная ошибка"
+        return f"⚠️ Ошибка ИИ: {message}"
+
+    try:
+        answer = data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError):
+        history.pop()
+        return "⚠️ ИИ вернул некорректный ответ. Попробуй ещё раз."
+
+    if not answer:
+        history.pop()
+        return "⚠️ ИИ вернул пустой ответ. Попробуй ещё раз."
+
+    history.append({"role": "assistant", "content": answer})
+    if len(history) > MEMORY_LIMIT:
+        chat_history[peer_id] = history[-MEMORY_LIMIT:]
+
+    return answer
+
+
+def reset_dialog(peer_id):
+    chat_history.pop(peer_id, None)
+    game_state.pop(peer_id, None)
+
+
+def start_game(peer_id):
+    game_state[peer_id] = {
+        "number": random.randint(1, 100),
+        "attempts": 0,
+    }
+    return "🎮 Я загадал число от 1 до 100. Попробуй угадать!\nЧтобы выйти — /stop"
+
+
+def handle_game_guess(peer_id, text):
+    game = game_state[peer_id]
+    try:
+        guess = int(text)
+    except ValueError:
+        return "Введи число от 1 до 100 или /stop для выхода."
+
+    if not 1 <= guess <= 100:
+        return "Число должно быть от 1 до 100."
+
+    game["attempts"] += 1
+    secret = game["number"]
+
+    if guess == secret:
+        attempts = game["attempts"]
+        game_state.pop(peer_id, None)
+        return f"🎉 Верно! Число {secret}. Попыток: {attempts}.\nНапиши /game, чтобы сыграть снова."
+
+    if guess < secret:
+        hint = "больше"
+    else:
+        hint = "меньше"
+
+    return f"🔢 Моё число {hint}. Попыток: {game['attempts']}."
+
+
+def handle_command(peer_id, text):
+    command = text.lower().split()[0]
+
+    if command in ("/help", "help", "помощь"):
+        send_message(peer_id, HELP_TEXT)
+        return True
+
+    if command in ("/start", "start", "старт"):
+        reset_dialog(peer_id)
+        send_message(peer_id, START_TEXT)
+        send_message(peer_id, ask_ai(peer_id, "Начни квест: опиши стартовую сцену и 3 варианта."))
+        return True
+
+    if command in ("/reset", "reset", "сброс", "заново"):
+        reset_dialog(peer_id)
+        send_message(peer_id, "Память очищена. Напиши /start, чтобы начать квест заново.")
+        return True
+
+    if command in ("/game", "game", "игра"):
+        send_message(peer_id, start_game(peer_id))
+        return True
+
+    if command in ("/stop", "stop", "стоп"):
+        if peer_id in game_state:
+            game_state.pop(peer_id, None)
+            send_message(peer_id, "Мини-игра завершена.")
+        else:
+            send_message(peer_id, "Ты не в мини-игре. Напиши /game, чтобы начать.")
+        return True
+
+    return False
+
+                               
+
+for event in longpoll.listen():
+    if event.type == VkBotEventType.MESSAGE_NEW:
+        peer_id = event.obj.message["peer_id"]
+        text = event.obj.message["text"].strip()
+
+        if not text:
+            continue
+
+        if handle_command(peer_id, text):
+            continue
+
+        if peer_id in game_state:
+            send_message(peer_id, handle_game_guess(peer_id, text))
+            continue
+
+        answer = ask_ai(peer_id, text)
+        send_message(peer_id, answer)
