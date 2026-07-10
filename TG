@@ -1,0 +1,251 @@
+import telebot;
+import asyncio
+import random
+import requests
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telebot import types
+
+
+# --- Конфигурация ---
+TELEGRAM_TOKEN = ""
+OPENROUTER_KEY = ""
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+SYSTEM_PROMPT = ("Ты - ИИ персонаж по имени Картошик Ты живёшь на основной поляне. "
+                 "Твоя роль: Тур гид по достопримечательностям мира Ты помогаешь людям, показывая им интересные места и достопримечательности. "
+                 "Твой характер: Спокойный, честный, без эмоциональный, рассудительный, неожиданный. Говори кратко, по делу, без воды "
+                 "Иногда используй фразы: Не знаю Без разницы Меньше чем X, но больше, чем Y Объясняй сложные вещи простыми словами "
+                 "Если ты не знаешь ответа - честно скажи об этом. При любом удобном случае ты так же пытаешься продать свой брэнд картошки, который называется картошка")
+MODEL = "openrouter/free"
+MEMORY_LIMIT = 10
+
+# --- Глобальные состояния (память) ---
+chat_history = {}
+game_state = {}
+
+# --- Тексты команд ---
+HELP_TEXT = (
+    "📋 Доступные команды:\n"
+    "/help — список команд\n"
+    "/start — начать диалог\n"
+    "/reset — сбросить память диалога\n"
+    "/game — мини-игра «Угадай число» (от 1 до 100)\n"
+    "/stop — выйти из мини-игры"
+)
+
+START_TEXT = (
+    "Привет, я Картошик. Твой ИИ гид по миру. Спрашивай, что интересно."
+)
+
+bot = telebot.TeleBot(TELEGRAM_TOKEN)
+
+
+def send_message(chat_id, text, reply_markup=None):
+    try:
+        bot.send_message(chat_id, text, reply_markup=reply_markup)
+    except Exception as e:
+        print(f"Ошибка отправки сообщения: {e}")
+
+
+def ask_ai(chat_id, user_text):
+    # Если SYSTEM_PROMPT пустой, шлем только историю, иначе добавляем system-сообщение
+    base_messages = chat_history.setdefault(chat_id, [])
+    
+    messages_to_send = []
+    if SYSTEM_PROMPT.strip():
+        messages_to_send.append({"role": "system", "content": SYSTEM_PROMPT})
+    messages_to_send.extend(base_messages)
+    messages_to_send.append({"role": "user", "content": user_text})
+
+    history = chat_history.setdefault(chat_id, [])
+    history.append({"role": "user", "content": user_text})
+
+    try:
+        response = requests.post(
+            OPENROUTER_URL,
+            headers={
+                "Authorization": f"Bearer {OPENROUTER_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": MODEL,
+                "messages": messages_to_send
+            },
+            timeout=60
+        )
+        data = response.json()
+    except requests.RequestException as e:
+        history.pop()
+        return f"⚠️ Ошибка сети: {str(e)}. Попробуй позже."
+
+    if response.status_code != 200 or "choices" not in data:
+        history.pop()
+        error = data.get("error", {})
+        message = error.get("message", str(error)) if isinstance(error, dict) else str(error)
+        return f"⚠️ Ошибка ИИ: {message}"
+
+    try:
+        answer = data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError):
+        history.pop()
+        return "⚠️ ИИ вернул некорректный ответ. Попробуй ещё раз."
+
+    if not answer:
+        history.pop()
+        return "⚠️ ИИ вернул пустой ответ. Попробуй ещё раз."
+
+    history.append({"role": "assistant", "content": answer})
+    if len(history) > MEMORY_LIMIT:
+        chat_history[chat_id] = history[-MEMORY_LIMIT:]
+
+    return answer
+
+
+def reset_dialog(chat_id):
+    chat_history.pop(chat_id, None)
+    game_state.pop(chat_id, None)
+
+
+def start_game(chat_id):
+    game_state[chat_id] = {
+        "number": random.randint(1, 100),
+        "attempts": 0,
+    }
+    return "🎮 Я загадал число от 1 до 100. Попробуй угадать!\nЧтобы выйти — /stop"
+
+
+def handle_game_guess(chat_id, text):
+    game = game_state.get(chat_id)
+    if not game:
+        return "Игра не найдена."
+        
+    try:
+        guess = int(text)
+    except ValueError:
+        return "Введи число от 1 до 100 или /stop для выхода."
+
+    if not 1 <= guess <= 100:
+        return "Число должно быть от 1 до 100."
+
+    game["attempts"] += 1
+    secret = game["number"]
+
+    if guess == secret:
+        attempts = game["attempts"]
+        game_state.pop(chat_id, None)
+        return f"🎉 Верно! Число {secret}. Попыток: {attempts}.\nНапиши /game, чтобы сыграть снова."
+
+    hint = "больше" if guess < secret else "меньше"
+    return f"🔢 Моё число {hint}. Попыток: {game['attempts']}."
+
+
+def create_help_keyboard():
+    """Создает клавиатуру для меню помощи"""
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    
+    btn_start = types.InlineKeyboardButton("🟢 Начать диалог", callback_data="action_start")
+    btn_game = types.InlineKeyboardButton("🎮 Мини-игра", callback_data="action_game")
+    btn_reset = types.InlineKeyboardButton("🔄 Сброс памяти", callback_data="action_reset")
+    btn_stop = types.InlineKeyboardButton("⏹️ Остановить игру", callback_data="action_stop")
+    
+    markup.add(btn_start, btn_game, btn_reset, btn_stop)
+    return markup
+
+
+def handle_command(message):
+    chat_id = message.chat.id
+    text = message.text.strip().lower()
+    command = text.split()[0]
+
+    if command in ("/help", "помощь"):
+        send_message(chat_id, HELP_TEXT, reply_markup=create_help_keyboard())
+        return True
+
+    if command in ("/start", "старт"):
+        reset_dialog(chat_id)
+        send_message(chat_id, START_TEXT)
+        ai_response = ask_ai(chat_id, "Ответь")
+        send_message(chat_id, ai_response)
+        return True
+
+    if command in ("/reset", "сброс", "заново"):
+        reset_dialog(chat_id)
+        send_message(chat_id, "Память очищена. Напиши /start, чтобы начать заново.")
+        return True
+
+    if command in ("/game", "игра"):
+        send_message(chat_id, start_game(chat_id))
+        return True
+
+    if command in ("/stop", "стоп"):
+        if chat_id in game_state:
+            game_state.pop(chat_id, None)
+            send_message(chat_id, "Мини-игра завершена.")
+        else:
+            send_message(chat_id, "Ты не в мини-игре. Напиши /game, чтобы начать.")
+        return True
+
+    return False
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('action_'))
+def help_button_handler(call):
+    action = call.data.replace('action_', '')
+    chat_id = call.message.chat.id
+    
+    bot.answer_callback_query(call.id)
+    
+    if action == 'start':
+        reset_dialog(chat_id)
+        send_message(chat_id, START_TEXT)
+        ai_response = ask_ai(chat_id, "Ответь")
+        send_message(chat_id, ai_response)
+        
+    elif action == 'game':
+        send_message(chat_id, start_game(chat_id))
+        
+    elif action == 'reset':
+        reset_dialog(chat_id)
+        send_message(chat_id, "Память очищена. Нажми «Начать диалог», чтобы продолжить.")
+        
+    elif action == 'stop':
+        if chat_id in game_state:
+            game_state.pop(chat_id, None)
+            send_message(chat_id, "Мини-игра завершена.")
+        else:
+            send_message(chat_id, "Игра не запущена.")
+
+
+@bot.message_handler(commands=['start', 'help', 'reset', 'game', 'stop'])
+def commands_handler(message):
+    handled = handle_command(message)
+    if handled:
+        return
+    fallback_answer = ask_ai(message.chat.id, message.text)
+    send_message(message.chat.id, fallback_answer)
+
+
+@bot.message_handler(func=lambda m: True)
+def default_handler(message):
+    chat_id = message.chat.id
+    
+    # Обработка нажатий на inline-кнопки
+    if isinstance(message, types.CallbackQuery):
+        bot.process_new_callback_query([message])
+        return
+
+    if handle_command(message):
+        return
+
+    if chat_id in game_state:
+        reply = handle_game_guess(chat_id, message.text)
+        send_message(chat_id, reply)
+        return
+
+    answer = ask_ai(chat_id, message.text)
+    send_message(chat_id, answer)
+
+
+if __name__ == "__main__":
+    print("Бот запущен...")
+    bot.infinity_polling(skip_pending=True)
