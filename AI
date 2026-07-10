@@ -1,0 +1,29 @@
+from cmd import PROMPT
+from nt import system
+import requests
+
+
+API_KEY = ""
+URL = "https://openrouter.ai/api/v1/chat/completions"
+
+
+
+
+system_prompt = "Ты - ИИ персонаж по имени Картошик Ты живёшь на осно. Тебе нужно представиться как: Я Картошик. Я твой ИИ гид по достопримечательностям мира. Могу рассказать всё, что тебе интересно. Чем могу помочь сейчас?"
+user_message = input("Введите сообщение: ")
+
+response = requests.post(URL, headers ={
+    "Authorization": f"Bearer {API_KEY}",
+    "Content-Type": "application/json"
+ }, json={
+    "model": "poolside/laguna-xs-2.1:free",
+    "messages": [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_message}
+    ]
+})
+
+data = response.json()
+answer = data["choices"][0]["message"]["content"]
+print(f"ИИ: {answer}")
+
